@@ -21,7 +21,6 @@ class Policy(object):
 
     def choose(self, agent, contexts, greedy=False):
         
-
         self.pi = self.probabilities(agent, contexts)
         
         if greedy:
@@ -65,12 +64,11 @@ class SoftmaxPolicy(Policy):
         self.key = 'value'
 
     def __str__(self):
-        return 'eps'
+        return 'eps'.format(self.beta)
 
     def probabilities(self, agent, contexts):
         v = agent.value_estimates(contexts)
         self.pi = softmax(self.beta*v)
-        
         return self.pi
 
 
@@ -81,14 +79,20 @@ class EpsilonGreedyPolicy(Policy):
         self.key = 'value'
 
     def __str__(self):
-        return 'eps'
+        return 'eps'.format(self.epsilon)
 
+    def get_samples(self):
+        return None
+
+    @staticmethod
+    def from_values(values,agent):
+        assert len(values.shape)==1
+        return  greedy_choice(values)
     def probabilities(self, agent, contexts):
         v = agent.value_estimates(contexts)
         self.pi = greedy_choice(v)       
         self.pi *= (1-self.epsilon)
         self.pi += self.epsilon/agent.bandit.k
-        
         return self.pi
 
 
@@ -108,7 +112,7 @@ class ProbabilityGreedyPolicy(Policy):
         self.key = 'probability'
 
     def __str__(self):
-        return 'PGP'
+        return 'PGP'.format(self.epsilon)
 
     def probabilities(self, agent, contexts):
         
@@ -166,6 +170,62 @@ class SCBPolicy(Policy):
             (agent.bandit.k+self.gamma*(values[best_arm]-values))
         self.pi[best_arm] += (1-(np.sum(self.pi)))
 
-
         return self.pi
 
+
+class BootstrapGreedyPolicy(Policy):
+
+    def __init__(self, m=1,bootstraps=1000,epsilon=0):
+        self.m = m
+        self.key = 'value'
+        self.bootstraps = bootstraps
+        self.epsilon=epsilon
+
+    def __str__(self):
+        return 'eps'
+
+    def get_samples(self):
+        return self.bootstraps
+
+    
+    @staticmethod
+    def from_values(values,agent):
+
+        return greedy_choice(values,axis=1).mean(axis=0)
+        
+
+    def probabilities(self, agent, contexts):
+        
+        samples = agent.value_estimates(contexts,samples=self.bootstraps)
+        self.pi =self.from_values(samples,agent)
+
+        assert len(self.pi)==agent.bandit.k,(np.shape(self.pi))
+        
+        self.pi *= (1-self.epsilon)
+        self.pi += self.epsilon/agent.bandit.k
+        return self.pi
+
+class LinEXP(Policy):
+
+    def __init__(self, eta,gamma):
+        self.eta = eta
+        self.gamma = gamma
+        self.key = 'probability'
+
+    def __str__(self):
+        return 'LinEXP'
+
+    def get_samples(self):
+        return None
+
+    @staticmethod
+    def from_values(values,agent):
+        assert len(values.shape)==1
+        p =  softmax(agent.t*agent.policy.eta*values)
+        p = (1-agent.policy.gamma)*p+ (agent.policy.gamma)/agent.bandit.k
+        return p
+    def probabilities(self, agent, contexts):
+
+        values = agent.value_estimates(contexts,mu_only=True)
+        self.pi = self.from_values(values,agent)
+        return self.pi

@@ -19,6 +19,43 @@ def prob_round(x):
     return (np.floor(x)+added).astype(int)
 
 
+def bootstrap_ci(data, n_bootstrap=1000):
+    bootstrap_means = []
+    for _ in range(n_bootstrap):
+        sample = data.sample(n=len(data), replace=True)
+        bootstrap_means.append(sample.mean())
+    lower_bound = np.percentile(bootstrap_means, 2.5)
+    upper_bound = np.percentile(bootstrap_means, 97.5)
+    return np.mean(bootstrap_means), lower_bound, upper_bound
+def bootstrap_confidence_interval(data, num_bootstrap_samples=500, alpha=0.05, axis=0,window_size=None):
+    """
+    Compute the bootstrapped 95% confidence intervals along a given axis.
+
+    Parameters:
+    data (ndarray): The input data array.
+    num_bootstrap_samples (int): The number of bootstrap samples to generate. Default is 1000.
+    alpha (float): The significance level. Default is 0.05 for a 95% confidence interval.
+    axis (int): The axis along which to compute the confidence interval. Default is 0.
+
+    Returns:
+    tuple: Lower and upper confidence intervals.
+    """
+    if window_size is not None:
+        data=np.rollaxis(data.reshape((data.shape[0],-1,window_size)),2,1).reshape((data.shape[0]*window_size,-1))
+    # Ensure the data is a NumPy array
+    data = np.asarray(data)
+
+    # Generate bootstrap samples
+    bootstrap_samples = np.random.choice(data.shape[axis], (num_bootstrap_samples, data.shape[axis]), replace=True)
+    
+    # Compute the statistic (mean) for each bootstrap sample
+    bootstrap_statistics = np.mean(np.take(data, bootstrap_samples, axis=axis),axis=axis+1)
+    # print(np.take(data, bootstrap_samples, axis=axis).shape,bootstrap_statistics.shape)
+    # Compute the confidence intervals
+    lower_bound = np.percentile(bootstrap_statistics, 100 * alpha / 2, axis=0)
+    upper_bound = np.percentile(bootstrap_statistics, 100 * (1 - alpha / 2), axis=0)
+    med = np.median(bootstrap_statistics,axis=0)
+    return lower_bound, upper_bound,med 
 def permutate(v, n):
     assert n != 1
     v = np.copy(v)
@@ -35,82 +72,69 @@ def permutate(v, n):
 
 import sys
 
-def get_truth_advice( cov_matr,  n_trials,alpha_beta=.1):
+def generate_decays(n_decays):
+    return (np.logspace(-3,0,n_decays+1)/2)[1:][::-1]
+from numpy.lib.stride_tricks import sliding_window_view
+def running_max(data, window_size):
+    # Pad the data on both sides to handle the window at the edges
+    pad_width = window_size // 2
+    padded_data = np.pad(data, pad_width, mode='edge')
     
-    x = np.random.multivariate_normal(mean=np.zeros(len(cov_matr)), cov=cov_matr, size=n_trials)
-    norm = stats.norm()
-    x_unif = norm.cdf(x)
-
-    # compute parameters to satisfy given means and variance
-
-    alpha = [alpha_beta]*len(cov_matr) 
-    beta = [alpha_beta]*len(cov_matr) 
-    advice = [stats.beta(a=alpha[i], b=beta[i]).ppf(x_unif[:, i]) for i in range(len(cov_matr))]
-
-
-
-    return advice[0],np.array(advice[1:])
-
-def get_err_advice(truth,dist):
-    b = np.random.uniform(0,1,size=truth.shape)
-
-
-
-    w_0 =max(0,(1-2*dist))**1
-    w_1 = max(0,(2*dist-1))**1
-    w_r = 1-w_0-w_1
-    return truth *w_0 + b*w_r+ w_1*(1-truth)
+    sliding_windows = sliding_window_view(padded_data, window_size)
     
+    max_values = np.max(sliding_windows, axis=1)
+    
+    return max_values[:len(data)]
 
 def get_r_advice(truth,dist):
     
     weights = np.random.choice([0,1],p=[1-dist,dist],size=truth.shape)
     return truth*(1-weights)+ (1-truth)*weights
    
-def get_advice( cov_matr, desired_var, truth,n_trials=None):
-    
-    if np.shape(desired_var)==():
-        desired_var = np.zeros(len(cov_matr))+desired_var
+def df_to_sarray(df):
+    """
+    Convert a pandas DataFrame object to a numpy structured array.
+    Also, for every column of a str type, convert it into 
+    a 'bytes' str literal of length = max(len(col)).
 
-    if n_trials is None:
-            n_trials=len(truth)
-    x = np.random.multivariate_normal(mean=np.zeros(len(cov_matr)), cov=cov_matr, size=n_trials)
-    norm = stats.norm()
-    x_unif = norm.cdf(x)
+    :param df: the data frame to convert
+    :return: a numpy structured array representation of df
+    """
 
-    # compute parameters to satisfy given means and variance
+    def make_col_type(col_type, col):
+        try:
+            if 'numpy.object_' in str(col_type.type):
+                maxlens = col.dropna().str.len()
+                if maxlens.any():
+                    try:
+                        maxlen = maxlens.max().astype(int) 
+                    except:
+                        maxlen = int(maxlens.max())
+                    col_type = 'S%s' % maxlen# ('S%s' % maxlen, 1)
+                else:
+                    col_type = 'f2'
+            return col.name, col_type
+        except:
+            print(col.name, col_type, col_type.type, type(col))
+            raise
 
-    desired_var = np.clip(desired_var,1e-5,1-1e-5)[:,None]+truth*0
-    max_error = np.maximum(0,((1-truth)-truth)**2-1e-10)**.5 
-    
-    desired_var *= max_error
-    
-    error = desired_var
-    max_variance = truth - truth**2 
-    
-    mu_biased = truth + (truth<0.5)*error - (truth>0.5)*error
+    v = df.values            
+    types = df.dtypes
+    numpy_struct_types = [make_col_type(types[col], df.loc[:, col]) for col in df.columns]
+    dtype = np.dtype(numpy_struct_types)
+    z = np.zeros(v.shape[0], dtype)
+    for (i, k) in enumerate(z.dtype.names):
+        try:
+            if dtype[i].str.startswith('|S'):
+                z[k] = df[k].str.encode('latin').astype('S')
+            else:
+                z[k] = v[:, i]
+        except:
+            print(k, v[:, i])
+            raise
 
-    var = mu_biased-mu_biased**2-1e-10
-   
-    var = np.clip(var,np.minimum(1e-5,(truth-truth**2-1e-10)/10), .01)
-  
-    alpha = ((1-mu_biased)/var -1/mu_biased)*mu_biased**2
-    beta = alpha*(1/mu_biased-1)
-  
+    return z, dtype
 
-    assert not np.isnan(alpha).any(),(var[np.isnan(alpha)],mu_biased[np.isnan(alpha)],( mu_biased-mu_biased**2)[np.isnan(alpha)],np.min(alpha))
-    assert np.min(alpha)>0,(var[alpha<=0],mu_biased[alpha<=0],( mu_biased-mu_biased**2)[alpha<=0],np.min(alpha))
-    assert np.min(beta)>0,(var[beta<=0],mu_biased[beta<=0],( mu_biased-mu_biased**2)[beta<=0])
-
-    if np.min(alpha)<0 or np.min(beta)<0:
-        print("clipping parameters",file=sys.stderr)
-        print(np.min(truth),np.max(truth))
-        alpha = np.maximum(0,alpha)
-        beta = np.maximum(0,beta)
-
-
-    advice = [stats.beta(a=alpha[i], b=beta[i]).ppf(x_unif[:, i]) for i in range(len(cov_matr))]
-    return np.array(advice)
 
 
 def arr2str(array):
@@ -135,7 +159,7 @@ def safe_logit(p, eps=1e-6):
 def SMInv(Ainv, u, v, alpha=1):
     u = u.reshape((len(u), 1))
     v = v.reshape((len(v), 1))
-    
+    # print(np.dot(np.dot(u, v.T), Ainv))
     return Ainv - np.dot(Ainv, np.dot(np.dot(u, v.T), Ainv)) / (1 + np.dot(v.T, np.dot(Ainv, u)))
 
 
